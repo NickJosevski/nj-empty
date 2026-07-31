@@ -20,7 +20,8 @@ jobs:
       # saying "name or ID" - passing "Spaces-162" fails with
       # "No spaces exist with name 'Spaces-162'".
       OCTOPUS_SPACE: OIDC With Claude
-      # The raw API calls below need the ID form.
+      # The raw API calls below need the ID form (the release list route
+      # requires the project ID - the project slug 404s).
       SPACE_ID: Spaces-162
 
     steps:
@@ -69,5 +70,5 @@ jobs:
           echo "action output release_number=${{ steps.create_release.outputs.release_number }}"
           curl -sS -f \
             -H "Authorization: Bearer $OCTOPUS_ACCESS_TOKEN" \
-            "$OCTOPUS_URL/api/$SPACE_ID/projects/oidc-demo/releases" \
+            "$OCTOPUS_URL/api/$SPACE_ID/projects/Projects-181/releases" \
           | jq '{Total: .TotalResults, Releases: [.Items[] | {Version, Assembled, LastModifiedBy}]}'
