@@ -16,7 +16,12 @@ jobs:
       contents: read
 
     env:
-      OCTOPUS_SPACE: Spaces-162
+      # create-release-action resolves this by NAME only, despite the docs
+      # saying "name or ID" - passing "Spaces-162" fails with
+      # "No spaces exist with name 'Spaces-162'".
+      OCTOPUS_SPACE: OIDC With Claude
+      # The raw API calls below need the ID form.
+      SPACE_ID: Spaces-162
 
     steps:
       - name: Log into Octopus
@@ -61,5 +66,5 @@ jobs:
           echo "action output release_number=${{ steps.create_release.outputs.release_number }}"
           curl -sS -f \
             -H "Authorization: Bearer $OCTOPUS_ACCESS_TOKEN" \
-            "$OCTOPUS_URL/api/$OCTOPUS_SPACE/projects/oidc-demo/releases" \
+            "$OCTOPUS_URL/api/$SPACE_ID/projects/oidc-demo/releases" \
           | jq '{Total: .TotalResults, Releases: [.Items[] | {Version, Assembled, LastModifiedBy}]}'
