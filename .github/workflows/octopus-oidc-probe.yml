@@ -58,8 +58,11 @@ jobs:
         with:
           project: OIDC Demo
           release_number: 1.0.${{ github.run_number }}
-          git_ref: ${{ github.ref }}
-          git_commit: ${{ github.sha }}
+          # git_ref / git_commit are ONLY valid for version-controlled (config-as-code)
+          # projects. Passing them to a regular database project fails with:
+          # "Since the provided project is not a version controlled project, the
+          #  GitCommit and GitRef arguments are not supported for this command."
+          # The sample workflow in the Octopus docs includes them unconditionally.
 
       - name: Confirm the release exists
         run: |
