@@ -1,0 +1,167 @@
+#!/bin/bash
+#
+# Creates a release in Octopus Deploy using the `octopus` CLI.
+#
+# Credentials are read from the environment (OCTOPUS_URL plus either
+# OCTOPUS_ACCESS_TOKEN or OCTOPUS_API_KEY), which is what the `octopus` CLI
+# itself expects. The recommended way to set them is the octopus-login plugin,
+# which uses OpenID Connect and stores no secret:
+#
+#   plugins:
+#     - OctopusDeploy/octopus-login#v1.0.0:
+#         server: "https://my.octopus.app"
+#         service_account_id: "..."
+#     - OctopusDeploy/create-release#v1.0.0:
+#         project: "HelloWorld"
+#
+# The `server` and `api_key` properties remain supported for pipelines that
+# cannot use OpenID Connect.
+#
+set -euo pipefail
+
+if [[ "${BUILDKITE_PLUGIN_CREATE_RELEASE_DEBUG:-false}" =~ ^(true|on|1)$ ]]; then
+  echo "--- :octopus-deploy: Enabling debug mode"
+  set -x
+  env | sort | grep BUILDKITE_PLUGIN_CREATE_RELEASE
+fi
+
+fail() {
+  echo "🐙 create-release failed: $1" >&2
+  exit 1
+}
+
+# Reads either a value or a list from plugin config into a global result array.
+# Returns success if values were read.
+function plugin_read_list_into_result() {
+  local prefix="$1"
+  local parameter="${prefix}_0"
+  result=()
+
+  if [[ -n "${!parameter:-}" ]]; then
+    local i=0
+    local parameter="${prefix}_${i}"
+    while [[ -n "${!parameter:-}" ]]; do
+      result+=("${!parameter}")
+      i=$((i + 1))
+      parameter="${prefix}_${i}"
+    done
+  elif [[ -n "${!prefix:-}" ]]; then
+    result+=("${!prefix}")
+  fi
+
+  [[ ${#result[@]} -gt 0 ]] || return 1
+}
+
+# ---------------------------------------------------------------------------
+# Options removed when this plugin moved from the retired `octo` CLI to
+# `octopus`. Ignoring these silently would change what the build does, so they
+# are hard errors; the cosmetic ones below are warnings.
+# ---------------------------------------------------------------------------
+for removed in WHAT_IF PACKAGE_PRERELEASE PACKAGES_FOLDER; do
+  var="BUILDKITE_PLUGIN_CREATE_RELEASE_${removed}"
+  if [[ -n "${!var:-}" ]]; then
+    lower="$(echo "$removed" | tr '[:upper:]' '[:lower:]')"
+    fail "the '${lower}' option is not supported by the 'octopus' CLI and has been removed. Leaving it set would silently change what this step does, so it is rejected rather than ignored. See the README for migration notes."
+  fi
+done
+
+for obsolete in CONFIG_FILE LOG_LEVEL TIMEOUT PROXY PROXY_USERNAME PROXY_PASSWORD IGNORE_SSL_ERRORS; do
+  var="BUILDKITE_PLUGIN_CREATE_RELEASE_${obsolete}"
+  if [[ -n "${!var:-}" ]]; then
+    lower="$(echo "$obsolete" | tr '[:upper:]' '[:lower:]')"
+    echo "⚠️  The '${lower}' option has no equivalent in the 'octopus' CLI and is being ignored." >&2
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# Credentials
+# ---------------------------------------------------------------------------
+if [[ -n "${BUILDKITE_PLUGIN_CREATE_RELEASE_SERVER:-}" ]]; then
+  export OCTOPUS_URL="${BUILDKITE_PLUGIN_CREATE_RELEASE_SERVER}"
+fi
+
+if [[ -n "${BUILDKITE_PLUGIN_CREATE_RELEASE_API_KEY:-}" ]]; then
+  # NOTE: this is the API key itself, not the name of a variable holding it.
+  # Earlier versions of this plugin took a variable name and eval'd it.
+  export OCTOPUS_API_KEY="${BUILDKITE_PLUGIN_CREATE_RELEASE_API_KEY}"
+fi
+
+[[ -n "${OCTOPUS_URL:-}" ]] || fail "no Octopus instance URL. Use the octopus-login plugin, or set the 'server' property."
+
+if [[ -z "${OCTOPUS_ACCESS_TOKEN:-}" && -z "${OCTOPUS_API_KEY:-}" ]]; then
+  fail "no Octopus credentials. Use the octopus-login plugin (recommended, no stored secret), or set the 'api_key' property."
+fi
+
+# ---------------------------------------------------------------------------
+# Build the command
+# ---------------------------------------------------------------------------
+cmd=("release" "create")
+
+# --no-prompt keeps the CLI non-interactive; without it, a missing required
+# value makes the CLI wait for input and the job hangs until it times out.
+cmd+=("--no-prompt")
+
+if [[ -n "${BUILDKITE_PLUGIN_CREATE_RELEASE_PROJECT:-}" ]]; then
+  cmd+=("--project" "${BUILDKITE_PLUGIN_CREATE_RELEASE_PROJECT}")
+fi
+
+if [[ -n "${BUILDKITE_PLUGIN_CREATE_RELEASE_SPACE:-}" ]]; then
+  cmd+=("--space" "${BUILDKITE_PLUGIN_CREATE_RELEASE_SPACE}")
+fi
+
+if [[ -n "${BUILDKITE_PLUGIN_CREATE_RELEASE_RELEASE_NUMBER:-}" ]]; then
+  cmd+=("--version" "${BUILDKITE_PLUGIN_CREATE_RELEASE_RELEASE_NUMBER}")
+fi
+
+if [[ -n "${BUILDKITE_PLUGIN_CREATE_RELEASE_CHANNEL:-}" ]]; then
+  cmd+=("--channel" "${BUILDKITE_PLUGIN_CREATE_RELEASE_CHANNEL}")
+fi
+
+if [[ -n "${BUILDKITE_PLUGIN_CREATE_RELEASE_DEFAULT_PACKAGE_VERSION:-}" ]]; then
+  cmd+=("--package-version" "${BUILDKITE_PLUGIN_CREATE_RELEASE_DEFAULT_PACKAGE_VERSION}")
+fi
+
+if plugin_read_list_into_result BUILDKITE_PLUGIN_CREATE_RELEASE_PACKAGES; then
+  for arg in "${result[@]}"; do
+    cmd+=("--package" "${arg}")
+  done
+fi
+
+if [[ -n "${BUILDKITE_PLUGIN_CREATE_RELEASE_GIT_REF:-}" ]]; then
+  cmd+=("--git-ref" "${BUILDKITE_PLUGIN_CREATE_RELEASE_GIT_REF}")
+fi
+
+if [[ -n "${BUILDKITE_PLUGIN_CREATE_RELEASE_GIT_COMMIT:-}" ]]; then
+  cmd+=("--git-commit" "${BUILDKITE_PLUGIN_CREATE_RELEASE_GIT_COMMIT}")
+fi
+
+if [[ -n "${BUILDKITE_PLUGIN_CREATE_RELEASE_RELEASE_NOTES:-}" ]]; then
+  cmd+=("--release-notes" "${BUILDKITE_PLUGIN_CREATE_RELEASE_RELEASE_NOTES}")
+fi
+
+if [[ -n "${BUILDKITE_PLUGIN_CREATE_RELEASE_RELEASE_NOTES_FILE:-}" ]]; then
+  cmd+=("--release-notes-file" "${BUILDKITE_PLUGIN_CREATE_RELEASE_RELEASE_NOTES_FILE}")
+fi
+
+if [[ "${BUILDKITE_PLUGIN_CREATE_RELEASE_IGNORE_EXISTING:-false}" =~ ^(true|on|1)$ ]]; then
+  cmd+=("--ignore-existing")
+fi
+
+if [[ "${BUILDKITE_PLUGIN_CREATE_RELEASE_IGNORE_CHANNEL_RULES:-false}" =~ ^(true|on|1)$ ]]; then
+  cmd+=("--ignore-channel-rules")
+fi
+
+if [[ -n "${BUILDKITE_PLUGIN_CREATE_RELEASE_OUTPUT_FORMAT:-}" ]]; then
+  cmd+=("--output-format" "${BUILDKITE_PLUGIN_CREATE_RELEASE_OUTPUT_FORMAT}")
+fi
+
+echo "+++ :octopus-deploy: Running release create"
+if [[ -n "${OCTOPUS_ACCESS_TOKEN:-}" ]]; then
+  echo "Authenticating to ${OCTOPUS_URL} with an access token"
+else
+  echo "Authenticating to ${OCTOPUS_URL} with an API key"
+fi
+# shellcheck disable=SC2145 # printing the command for visibility; it holds no secrets
+echo "Running command: octopus ${cmd[@]}"
+
+octopus "${cmd[@]}"
