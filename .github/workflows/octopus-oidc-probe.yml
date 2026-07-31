@@ -1,0 +1,43 @@
+name: Octopus OIDC probe
+
+# Proves the full inbound OIDC path with no Octopus API key anywhere:
+#   GitHub mints an ID token -> OctopusDeploy/login exchanges it at POST /token/v1
+#   -> Octopus returns a 1-hour access token -> we call the API with it.
+on:
+  workflow_dispatch:
+
+jobs:
+  login:
+    runs-on: ubuntu-latest
+    name: Exchange a GitHub ID token for an Octopus access token
+    permissions:
+      # Specifying permissions resets the job's defaults, so both are listed explicitly.
+      id-token: write # required by OctopusDeploy/login to request the ID token
+      contents: read
+
+    steps:
+      - name: Log into Octopus
+        uses: OctopusDeploy/login@v1
+        with:
+          server: https://md.octopus.app
+          service_account_id: 76633d80-1bb5-4c6d-8894-c8d1f70e144d
+
+      # login sets OCTOPUS_URL and OCTOPUS_ACCESS_TOKEN for the rest of the job.
+      - name: Show which principal the token resolved to
+        run: |
+          echo "OCTOPUS_URL=$OCTOPUS_URL"
+          echo "access token length: ${#OCTOPUS_ACCESS_TOKEN}"
+          curl -sS -f \
+            -H "Authorization: Bearer $OCTOPUS_ACCESS_TOKEN" \
+            "$OCTOPUS_URL/api/users/me" \
+          | jq '{Id, Username, DisplayName, IsService}'
+
+      - name: Decode the access token claims (not the signature)
+        run: |
+          payload=$(printf '%s' "$OCTOPUS_ACCESS_TOKEN" | cut -d. -f2)
+          # pad to a multiple of 4 for base64url decoding
+          case $(( ${#payload} % 4 )) in
+            2) payload="${payload}==" ;;
+            3) payload="${payload}=" ;;
+          esac
+          printf '%s' "$payload" | tr '_-' '/+' | base64 -d 2>/dev/null | jq '.'
