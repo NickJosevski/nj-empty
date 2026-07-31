@@ -1,0 +1,171 @@
+#!/bin/bash
+#
+# Octopus Deploy login for Buildkite.
+#
+# Exchanges a Buildkite OIDC ID token for a short-lived Octopus access token and
+# exports it, so later commands in this step - including the `octopus` CLI and
+# other Octopus plugins - need no credentials of their own.
+#
+# This runs as an `environment` hook, which Buildkite sources into the job's
+# shell. Exports therefore reach the command, but only for THIS step: unlike a
+# GitHub Actions job, Buildkite steps do not share an environment. Add this
+# plugin to every step that talks to Octopus. Each step mints its own token,
+# which is a security improvement, not a workaround.
+#
+set -euo pipefail
+
+readonly TOKEN_EXCHANGE_GRANT_TYPE="urn:ietf:params:oauth:grant-type:token-exchange"
+readonly TOKEN_EXCHANGE_SUBJECT_TOKEN_TYPE="urn:ietf:params:oauth:token-type:jwt"
+
+server="${BUILDKITE_PLUGIN_OCTOPUS_LOGIN_SERVER:-}"
+service_account_id="${BUILDKITE_PLUGIN_OCTOPUS_LOGIN_SERVICE_ACCOUNT_ID:-}"
+api_key="${BUILDKITE_PLUGIN_OCTOPUS_LOGIN_API_KEY:-}"
+space="${BUILDKITE_PLUGIN_OCTOPUS_LOGIN_SPACE:-}"
+
+fail() {
+  echo "🐙 Octopus login failed: $1" >&2
+  exit 1
+}
+
+# Trailing slashes produce '//token/v1' style URLs on some servers.
+normalize_url() {
+  local url="$1"
+  while [[ "$url" == */ ]]; do url="${url%/}"; done
+  printf '%s' "$url"
+}
+
+# Read one top-level string field from a JSON document on stdin.
+# Uses jq when present, else python3. One of the two is required.
+json_field() {
+  local field="$1"
+  if command -v jq >/dev/null 2>&1; then
+    jq -er --arg f "$field" '.[$f] // empty'
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c '
+import json, sys
+try:
+    value = json.load(sys.stdin).get(sys.argv[1])
+except ValueError:
+    sys.exit(1)
+if value is None:
+    sys.exit(1)
+print(value)
+' "$field"
+  else
+    fail "this plugin needs either 'jq' or 'python3' on the agent to parse JSON responses."
+  fi
+}
+
+# Build the token exchange request body with correct JSON escaping.
+build_exchange_body() {
+  local audience="$1" subject_token="$2"
+  if command -v jq >/dev/null 2>&1; then
+    jq -nc \
+      --arg grant_type "$TOKEN_EXCHANGE_GRANT_TYPE" \
+      --arg audience "$audience" \
+      --arg subject_token "$subject_token" \
+      --arg subject_token_type "$TOKEN_EXCHANGE_SUBJECT_TOKEN_TYPE" \
+      '{grant_type: $grant_type, audience: $audience, subject_token: $subject_token, subject_token_type: $subject_token_type}'
+  else
+    python3 -c '
+import json, sys
+print(json.dumps({
+    "grant_type": sys.argv[1],
+    "audience": sys.argv[2],
+    "subject_token": sys.argv[3],
+    "subject_token_type": sys.argv[4],
+}))
+' "$TOKEN_EXCHANGE_GRANT_TYPE" "$audience" "$subject_token" "$TOKEN_EXCHANGE_SUBJECT_TOKEN_TYPE"
+  fi
+}
+
+# Ask the agent to keep a value out of the build log. Supported from
+# buildkite-agent 3.67; older agents simply skip it.
+redact() {
+  if buildkite-agent redactor add --help >/dev/null 2>&1; then
+    printf '%s' "$1" | buildkite-agent redactor add >/dev/null 2>&1 || true
+  fi
+}
+
+[[ -n "$server" ]] || fail "the Octopus instance URL is required, please specify using the 'server' property."
+
+if [[ -z "$service_account_id" && -z "$api_key" ]]; then
+  fail "a service account ID or an API key is required. Please specify using either the 'service_account_id' or 'api_key' property."
+fi
+
+if [[ -n "$service_account_id" && -n "$api_key" ]]; then
+  fail "only one of 'service_account_id' or 'api_key' can be supplied."
+fi
+
+server="$(normalize_url "$server")"
+
+if [[ -n "$service_account_id" ]]; then
+  echo "~~~ 🐙 Logging in to Octopus Deploy at $server with OpenID Connect"
+
+  # 1. Buildkite mints an ID token whose audience is the Octopus service account.
+  echo "Requesting an OIDC token from Buildkite for service account '$service_account_id'"
+  if ! id_token="$(buildkite-agent oidc request-token --audience "$service_account_id" 2>&1)"; then
+    fail "could not obtain an OIDC token from Buildkite: ${id_token}"
+  fi
+  [[ -n "$id_token" ]] || fail "Buildkite returned an empty OIDC token."
+  redact "$id_token"
+
+  # 2. OpenID discovery tells us where to exchange it.
+  discovery_url="${server}/.well-known/openid-configuration"
+  if ! discovery_response="$(curl -sSf --max-time 30 "$discovery_url" 2>&1)"; then
+    fail "could not read OpenID configuration from ${discovery_url}: ${discovery_response}"
+  fi
+  if ! token_endpoint="$(printf '%s' "$discovery_response" | json_field token_endpoint)"; then
+    fail "no 'token_endpoint' in the OpenID configuration at ${discovery_url}. Is '${server}' an Octopus Server?"
+  fi
+
+  # 3. RFC 8693 token exchange.
+  echo "Exchanging the OIDC token for an Octopus access token at $token_endpoint"
+  exchange_body="$(build_exchange_body "$service_account_id" "$id_token")"
+  exchange_response_file="$(mktemp)"
+  trap 'rm -f "$exchange_response_file"' EXIT
+
+  http_status="$(curl -sS --max-time 30 -o "$exchange_response_file" -w '%{http_code}' \
+    -X POST "$token_endpoint" \
+    -H 'Content-Type: application/json' \
+    -d "$exchange_body" || true)"
+
+  if [[ "$http_status" != "200" ]]; then
+    echo "Octopus returned HTTP ${http_status} from the token exchange:" >&2
+    cat "$exchange_response_file" >&2
+    echo >&2
+    echo "The most common cause is a subject mismatch. Buildkite's subject claim is:" >&2
+    echo "  organization:<org>:pipeline:<pipeline>:ref:<ref>:commit:<sha>:step:<step-key>" >&2
+    echo "Because it includes the commit SHA, the Subject on the Octopus OIDC identity" >&2
+    echo "almost always needs wildcards, e.g." >&2
+    echo "  organization:${BUILDKITE_ORGANIZATION_SLUG:-<org>}:pipeline:${BUILDKITE_PIPELINE_SLUG:-<pipeline>}:ref:refs/heads/main:commit:*:step:*" >&2
+    fail "token exchange rejected."
+  fi
+
+  if ! access_token="$(json_field access_token < "$exchange_response_file")"; then
+    fail "the token exchange response did not contain an access token."
+  fi
+  redact "$access_token"
+
+  export OCTOPUS_URL="$server"
+  export OCTOPUS_ACCESS_TOKEN="$access_token"
+  # Ensure a stale API key from the agent environment cannot take precedence.
+  unset OCTOPUS_API_KEY || true
+
+  echo "🐙 Login successful. OCTOPUS_URL and OCTOPUS_ACCESS_TOKEN are set for this step."
+else
+  echo "~~~ 🐙 Logging in to Octopus Deploy at $server with an API key"
+  redact "$api_key"
+
+  export OCTOPUS_URL="$server"
+  export OCTOPUS_API_KEY="$api_key"
+  unset OCTOPUS_ACCESS_TOKEN || true
+
+  echo "🐙 Login successful. OCTOPUS_URL and OCTOPUS_API_KEY are set for this step."
+  echo "Consider using OpenID Connect instead - it needs no stored secret and issues short-lived tokens."
+fi
+
+if [[ -n "$space" ]]; then
+  export OCTOPUS_SPACE="$space"
+  echo "Default space for this step: $space"
+fi
