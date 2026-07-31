@@ -2,7 +2,7 @@ name: Octopus OIDC probe
 
 # Proves the full inbound OIDC path with no Octopus API key anywhere:
 #   GitHub mints an ID token -> OctopusDeploy/login exchanges it at POST /token/v1
-#   -> Octopus returns a 1-hour access token -> we call the API with it.
+#   -> Octopus returns a 1-hour access token -> later steps use it implicitly.
 on:
   workflow_dispatch:
 
@@ -15,9 +15,12 @@ jobs:
       id-token: write # required by OctopusDeploy/login to request the ID token
       contents: read
 
+    env:
+      OCTOPUS_SPACE: Spaces-162
+
     steps:
       - name: Log into Octopus
-        uses: OctopusDeploy/login@v1
+        uses: OctopusDeploy/login@v2
         with:
           server: https://md.octopus.app
           service_account_id: 76633d80-1bb5-4c6d-8894-c8d1f70e144d
@@ -41,3 +44,22 @@ jobs:
             3) payload="${payload}=" ;;
           esac
           printf '%s' "$payload" | tr '_-' '/+' | base64 -d 2>/dev/null | jq '.'
+
+      # The real operation. No credentials passed in - it picks up
+      # OCTOPUS_URL and OCTOPUS_ACCESS_TOKEN from the environment.
+      - name: Create a release in Octopus
+        id: create_release
+        uses: OctopusDeploy/create-release-action@v4
+        with:
+          project: OIDC Demo
+          release_number: 1.0.${{ github.run_number }}
+          git_ref: ${{ github.ref }}
+          git_commit: ${{ github.sha }}
+
+      - name: Confirm the release exists
+        run: |
+          echo "action output release_number=${{ steps.create_release.outputs.release_number }}"
+          curl -sS -f \
+            -H "Authorization: Bearer $OCTOPUS_ACCESS_TOKEN" \
+            "$OCTOPUS_URL/api/$OCTOPUS_SPACE/projects/oidc-demo/releases" \
+          | jq '{Total: .TotalResults, Releases: [.Items[] | {Version, Assembled, LastModifiedBy}]}'
