@@ -1,0 +1,22 @@
+name: Octopus Deploy Login
+description: Authenticate to Octopus Deploy with OpenID Connect so later steps need no API key
+author: https://github.com/OctopusDeploy
+requirements:
+  - curl
+configuration:
+  properties:
+    server:
+      type: string
+      description: 'The base URL hosting Octopus Deploy (i.e. "https://octopus.example.app").'
+    service_account_id:
+      type: string
+      description: 'The ID of the Octopus service account to log in as. Required when using OpenID Connect. Found under Configuration ➜ Users ➜ (service account) ➜ OpenID Connect.'
+    api_key:
+      type: string
+      description: 'An Octopus API key to use instead of OpenID Connect. Supply the key itself, ideally from a Buildkite secret. OpenID Connect is strongly preferred; API keys are for instances where OIDC is not available.'
+    space:
+      type: string
+      description: 'Optional. The name or ID of a Space to make the default for subsequent steps, exported as OCTOPUS_SPACE.'
+  required:
+    - server
+  additionalProperties: false
