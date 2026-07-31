@@ -40,11 +40,13 @@ export BUILDKITE_PLUGIN_CREATE_RELEASE_PROJECT="OIDC Demo"
 export BUILDKITE_PLUGIN_CREATE_RELEASE_RELEASE_NUMBER="3.0.${BUILDKITE_BUILD_NUMBER}"
 export BUILDKITE_PLUGIN_CREATE_RELEASE_OUTPUT_FORMAT="basic"
 
-.buildkite/plugins/create-release/hooks/command
+# invoked via bash: the gh contents API uploaded these without the exec bit.
+# In the real repos hooks/command is committed 100755.
+bash .buildkite/plugins/create-release/hooks/command
 
 echo "--- :test_tube: Negative check: a removed option must be rejected, not ignored"
 export BUILDKITE_PLUGIN_CREATE_RELEASE_WHAT_IF="true"
-if .buildkite/plugins/create-release/hooks/command; then
+if bash .buildkite/plugins/create-release/hooks/command; then
   echo "FAIL: what_if was accepted; it should have been rejected"
   exit 1
 fi
